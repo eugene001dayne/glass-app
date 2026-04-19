@@ -2,13 +2,19 @@
 
 import { useState, useRef, useEffect } from "react";
 
+const EXAMPLES = [
+  "Build a landing page for my bakery called Golden Crumb",
+  "Create a Python script that organises my downloads folder by file type",
+  "Set up a portfolio site with an about page and contact form",
+];
+
 function StepCard({ card, isDark }) {
   const cardBg = {
-    done:     isDark ? "bg-green-950/20  border-green-800/40"  : "bg-green-50    border-green-200",
-    active:   isDark ? "bg-orange-950/20 border-orange-600/50" : "bg-orange-50   border-orange-300",
-    waiting:  isDark ? "bg-white/[0.02]  border-white/8"       : "bg-white       border-black/10",
-    rolled:   isDark ? "bg-red-950/20    border-red-800/40"    : "bg-red-50      border-red-200",
-    approved: isDark ? "bg-green-950/20  border-green-700/50"  : "bg-green-50    border-green-200",
+    done:     isDark ? "bg-green-950/20  border-green-800/40"  : "bg-green-50  border-green-200",
+    active:   isDark ? "bg-orange-950/20 border-orange-600/50" : "bg-orange-50 border-orange-300",
+    waiting:  isDark ? "bg-white/[0.02]  border-white/8"       : "bg-white     border-black/10",
+    rolled:   isDark ? "bg-red-950/20    border-red-800/40"    : "bg-red-50    border-red-200",
+    approved: isDark ? "bg-green-950/20  border-green-700/50"  : "bg-green-50  border-green-200",
   }[card.state] || "";
 
   const labelColor   = isDark ? "text-white/90" : "text-black/80";
@@ -77,122 +83,62 @@ function StateIcon({ state, isDark }) {
   );
 }
 
+function GlassLogo() {
+  return (
+    <div className="w-7 h-7 bg-orange-600 rounded-lg flex items-center justify-center flex-shrink-0">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+        <circle cx="7" cy="7" r="5.5" stroke="white" strokeWidth="1.5"/>
+        <path d="M4.5 7L6.5 9L9.5 5" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+      </svg>
+    </div>
+  );
+}
+
 export default function Glass() {
   const [theme, setTheme]             = useState("dark");
   const [hoodOpen, setHoodOpen]       = useState(false);
   const [input, setInput]             = useState("");
-  const [agentStatus, setAgentStatus] = useState("agent working");
-  const [agentBusy, setAgentBusy]     = useState(true);
+  const [agentStatus, setAgentStatus] = useState("ready");
+  const [agentBusy, setAgentBusy]     = useState(false);
+  const [started, setStarted]         = useState(false);  // false = empty state
+  const [sessionName, setSessionName] = useState("");
   const threadRef   = useRef(null);
   const termRef     = useRef(null);
-  const unlistenRef = useRef([]); // holds Tauri event unsubscribe functions
+  const inputRef    = useRef(null);
+  const unlistenRef = useRef([]);
 
-  const [thread, setThread] = useState([
-    { type:"user", text:"make me a landing page for my bakery called Golden Crumb" },
-    { type:"card", id:"c1", label:"understood your request",  sub:"bakery landing page — Golden Crumb — warm tone, contact form", state:"done" },
-    { type:"card", id:"c2", label:"created file structure",   sub:"index.html — style.css — images/ — contact.js", state:"done",
-      diff:["+ golden-crumb/index.html","+ golden-crumb/style.css","+ golden-crumb/contact.js"] },
-    { type:"card", id:"c3", label:"writing the homepage",     sub:"hero, menu highlights, about section, contact form", state:"active",
-      diff:['  <body>','+   <section class="hero">','+     <h1>Golden Crumb</h1>','+     <p>Fresh from the oven, every morning</p>','-     <!-- hero placeholder -->','  </section>'],
-      explain:"Claude is writing the top section of your page — your bakery name and tagline. Nothing is saved permanently until you approve." },
-    { type:"card", id:"c4", label:"add styling & colours",    sub:"warm amber palette — mobile responsive", state:"waiting" },
-    { type:"card", id:"c5", label:"preview ready for review", sub:"approve, redirect, or download",         state:"waiting" },
-  ]);
-
-  const [plan, setPlan] = useState([
-    { id:"p1", label:"understand task", state:"done"   },
-    { id:"p2", label:"create files",    state:"done"   },
-    { id:"p3", label:"write homepage",  state:"active" },
-    { id:"p4", label:"add styling",     state:"next"   },
-    { id:"p5", label:"preview",         state:"next"   },
-  ]);
-
-  const [stats, setStats] = useState({ steps:2, total:5, actions:7, files:3, redirects:0 });
-
+  const [thread, setThread]     = useState([]);
+  const [plan, setPlan]         = useState([]);
+  const [stats, setStats]       = useState({ steps:0, total:0, actions:0, files:0, redirects:0 });
   const [termLines, setTermLines] = useState([
-    { cls:"dim",  text:"glass v0.1 — session started"        },
-    { cls:"dim",  text:"─────────────────────────"           },
-    { cls:"cmd",  text:'$ claude --task "landing page"'       },
-    { cls:"out",  text:"agent session initialised"            },
-    { cls:"out",  text:"reading task context..."              },
-    { cls:"cmd",  text:"$ mkdir golden-crumb"                 },
-    { cls:"out",  text:"created: index.html"                  },
-    { cls:"out",  text:"created: style.css"                   },
-    { cls:"out",  text:"created: contact.js"                  },
-    { cls:"cmd",  text:"$ write index.html"                   },
-    { cls:"warn", text:"→ writing hero section..."            },
-    { cls:"out",  text:'> h1: "Golden Crumb"'                },
-    { cls:"out",  text:'> tagline: "Fresh from the oven..."'  },
-    { cls:"dim",  text:"─────────────────────────"           },
-    { cls:"dim",  text:"pending: menu section"                },
-    { cls:"dim",  text:"pending: contact form"                },
-    { cls:"dim",  text:"pending: style.css"                   },
+    { cls:"dim", text:"glass v0.1 — waiting for task" },
   ]);
 
   useEffect(() => { if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight; }, [thread]);
   useEffect(() => { if (termRef.current)   termRef.current.scrollTop   = termRef.current.scrollHeight;   }, [termLines]);
+  useEffect(() => { return () => { unlistenRef.current.forEach(fn => fn()); }; }, []);
 
-  // cleanup Tauri listeners on unmount
-  useEffect(() => {
-    return () => { unlistenRef.current.forEach(fn => fn()); };
-  }, []);
+  // focus input on load
+  useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
 
   const addTermLine = (cls, text) => setTermLines(p => [...p, { cls, text }]);
   const addNote     = (text, color="") => setThread(p => [...p, { type:"note", text, color }]);
   const updateCard  = (id, changes) => setThread(p => p.map(i => i.type==="card" && i.id===id ? {...i,...changes} : i));
 
-  function approveStep() {
-    updateCard("c3", { state:"approved" });
-    updateCard("c4", { state:"active" });
-    setPlan(p => p.map(x => x.id==="p3" ? {...x,state:"done"} : x.id==="p4" ? {...x,state:"active"} : x));
-    setStats(p => ({...p, steps:3, actions:p.actions+2}));
-    addNote("you approved — styling next");
-    addTermLine("cmd","$ [user approved] → writing style.css");
-    setAgentStatus("styling in progress");
-  }
-
-  function approveAll() {
-    setThread(p => p.map(i => i.type==="card" ? {...i, state:(i.state==="waiting"||i.state==="active")?"approved":i.state} : i));
-    setPlan(p => p.map(x => ({...x, state:"done"})));
-    setStats(p => ({...p, steps:5}));
-    setAgentBusy(false);
-    setAgentStatus("all steps approved");
-    addNote("Glass is finishing up — all approved");
-    addTermLine("cmd","$ [approve-all] running remaining steps...");
-  }
-
-  function rollBack() {
-    setThread(prev => {
-      if (prev.some(i => i.type==="note" && i.text==="rolling back last step...")) return prev;
-      return [...prev, { type:"note", text:"rolling back last step...", color:"err" }];
-    });
-    updateCard("c3", { state:"rolled" });
-    addTermLine("err","$ git reset --soft HEAD~1");
-    setAgentStatus("rolled back");
-    setAgentBusy(false);
-  }
-
-  // ── detect Tauri environment ──────────────────────────────────────────────
   const isTauri = typeof window !== "undefined" && !!window.__TAURI__;
 
-  // ── Tauri event handler for step cards ───────────────────────────────────
   function handleStepCardEvent(data) {
     if (data.type === "step") {
       const cardId = `live-${Date.now()}-${Math.random()}`;
       setThread(p => [...p, {
-        type: "card",
-        id: cardId,
-        label: data.label,
-        sub: data.sub,
-        state: data.state,
-        diff: data.diff || null,
+        type:"card", id:cardId,
+        label:data.label, sub:data.sub,
+        state:data.state, diff:data.diff || null,
       }]);
       addTermLine(data.state === "done" ? "out" : "warn", `→ ${data.label}`);
-      setStats(p => ({...p, actions: p.actions + 1}));
+      setStats(p => ({...p, actions:p.actions+1}));
     }
-    if (data.type === "explain") {
-      addNote(data.text);
-    }
+    if (data.type === "explain") addNote(data.text);
     if (data.type === "done") {
       setAgentBusy(false);
       setAgentStatus("done");
@@ -200,114 +146,122 @@ export default function Glass() {
     }
   }
 
-  // ── send handler: Tauri path or web fetch path ────────────────────────────
-  async function handleSend() {
-    const val = input.trim();
+  // find the most recently active card and approve it, activate next waiting one
+  function approveStep() {
+    setThread(prev => {
+      const cards = prev.filter(i => i.type === "card");
+      const activeIdx = cards.findLastIndex(c => c.state === "active");
+      if (activeIdx === -1) return prev;
+      const activeCard = cards[activeIdx];
+      const nextWaiting = cards.slice(activeIdx + 1).find(c => c.state === "waiting");
+      return prev.map(i => {
+        if (i.type !== "card") return i;
+        if (i.id === activeCard.id) return { ...i, state:"approved" };
+        if (nextWaiting && i.id === nextWaiting.id) return { ...i, state:"active" };
+        return i;
+      });
+    });
+    addNote("approved — continuing");
+    addTermLine("cmd", "$ [user approved]");
+    setStats(p => ({...p, steps:p.steps+1}));
+  }
+
+  function approveAll() {
+    setThread(p => p.map(i => i.type==="card"
+      ? {...i, state:(i.state==="waiting"||i.state==="active") ? "approved" : i.state}
+      : i
+    ));
+    setPlan(p => p.map(x => ({...x, state:"done"})));
+    setAgentBusy(false);
+    setAgentStatus("all approved");
+    addNote("all steps approved");
+    addTermLine("cmd", "$ [approve-all]");
+  }
+
+  function rollBack() {
+    setThread(prev => {
+      const lastActive = [...prev].reverse().find(i => i.type==="card" && (i.state==="active"||i.state==="approved"));
+      if (!lastActive) return prev;
+      const already = prev.some(i => i.type==="note" && i.text==="rolling back last step...");
+      const next = prev.map(i => i.type==="card" && i.id===lastActive.id ? {...i, state:"rolled"} : i);
+      return already ? next : [...next, {type:"note", text:"rolling back last step...", color:"err"}];
+    });
+    addTermLine("err", "$ git reset --soft HEAD~1");
+    setAgentStatus("rolled back");
+    setStats(p => ({...p, redirects:p.redirects+1}));
+  }
+
+  async function handleSend(override) {
+    const val = (override || input).trim();
     if (!val) return;
     setInput("");
+
+    // first task — activate the cockpit
+    if (!started) {
+      setStarted(true);
+      setSessionName(val.length > 32 ? val.slice(0, 32) + "…" : val);
+      setTermLines([
+        { cls:"dim", text:"glass v0.1 — session started" },
+        { cls:"dim", text:"─────────────────────────" },
+        { cls:"cmd", text:`$ glass --task "${val}"` },
+      ]);
+    }
+
     setAgentBusy(true);
     setAgentStatus("agent working...");
     setThread(p => [...p, { type:"user", text:val }]);
-    addTermLine("cmd", `$ glass --task "${val}"`);
+    if (started) addTermLine("cmd", `$ glass --task "${val}"`);
+    setStats(p => ({...p, redirects: started ? p.redirects+1 : p.redirects}));
 
     if (isTauri) {
-      // ── desktop path ──
       try {
-        // clean up any old listeners
         unlistenRef.current.forEach(fn => fn());
         unlistenRef.current = [];
-
-        const { listen } = await import("@tauri-apps/api/event");
-        const { invoke } = await import("@tauri-apps/api/core");
-
-        // listen to step cards from Rust
-        const unlistenCards = await listen("step-card", (event) => {
-          handleStepCardEvent(event.payload);
-        });
-
-        // listen to terminal lines from Rust
-        const unlistenTerm = await listen("terminal-line", (event) => {
-          const { cls, text } = event.payload;
-          if (text && text.trim()) addTermLine(cls, text.trim());
-        });
-
-        // listen for cancel
-        const unlistenCancel = await listen("agent-cancelled", () => {
-          setAgentBusy(false);
-          setAgentStatus("cancelled");
-          addNote("agent cancelled", "err");
-        });
-
-        unlistenRef.current = [unlistenCards, unlistenTerm, unlistenCancel];
-
-        // invoke the Rust command
-        await invoke("run_agent", { task: val, history: [] });
-
-      } catch (err) {
-        setThread(p => [...p, {
-          type:"card", id:`err-${Date.now()}`,
-          label:"error starting agent",
-          sub: String(err),
-          state:"rolled"
-        }]);
-        setAgentBusy(false);
-        setAgentStatus("error");
+        const { listen }  = await import("@tauri-apps/api/event");
+        const { invoke }  = await import("@tauri-apps/api/core");
+        const unlistenCards  = await listen("step-card",      e => handleStepCardEvent(e.payload));
+        const unlistenTerm   = await listen("terminal-line",  e => { const {cls,text}=e.payload; if(text?.trim()) addTermLine(cls,text.trim()); });
+        const unlistenCancel = await listen("agent-cancelled", () => { setAgentBusy(false); setAgentStatus("cancelled"); addNote("agent cancelled","err"); });
+        unlistenRef.current  = [unlistenCards, unlistenTerm, unlistenCancel];
+        await invoke("run_agent", { task:val, history:[] });
+      } catch(err) {
+        setThread(p => [...p, { type:"card", id:`err-${Date.now()}`, label:"error starting agent", sub:String(err), state:"rolled" }]);
+        setAgentBusy(false); setAgentStatus("error");
       }
-
     } else {
-      // ── web path (unchanged) ──
       try {
-        const res = await fetch("/api/agent", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ task: val }),
-        });
-
+        const res     = await fetch("/api/agent", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({task:val}) });
         const reader  = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer    = "";
-
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
+          buffer += decoder.decode(value, { stream:true });
           const lines = buffer.split("\n");
           buffer = lines.pop();
-
           for (const line of lines) {
             if (!line.trim()) continue;
-            try {
-              const data = JSON.parse(line);
-              handleStepCardEvent(data);
-            } catch { /* incomplete JSON */ }
+            try { handleStepCardEvent(JSON.parse(line)); } catch {}
           }
         }
-      } catch (err) {
-        setThread(p => [...p, {
-          type:"card", id:`err-${Date.now()}`,
-          label:"connection error",
-          sub: err.message,
-          state:"rolled"
-        }]);
         setAgentBusy(false);
-        setAgentStatus("error");
+        if (agentStatus === "agent working...") setAgentStatus("done");
+      } catch(err) {
+        setThread(p => [...p, { type:"card", id:`err-${Date.now()}`, label:"connection error", sub:err.message, state:"rolled" }]);
+        setAgentBusy(false); setAgentStatus("error");
       }
     }
   }
 
-  // ── pause / cancel ────────────────────────────────────────────────────────
   async function handlePause() {
     if (!isTauri) return;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("cancel_agent");
-      setAgentBusy(false);
-      setAgentStatus("paused");
+      setAgentBusy(false); setAgentStatus("paused");
       addNote("agent paused");
-    } catch (err) {
-      console.error("pause failed:", err);
-    }
+    } catch {}
   }
 
   const isDark = theme === "dark";
@@ -336,36 +290,104 @@ export default function Glass() {
       ? "border-white/10 text-white/35 hover:border-white/20 hover:text-white/60"
       : "border-black/12 text-black/40 hover:border-black/20 hover:text-black/60",
     statCard:    isDark ? "bg-white/[0.02] border-white/8" : "bg-white border-black/10",
+    exampleBtn:  isDark
+      ? "border-white/8 text-white/40 hover:border-orange-600/40 hover:text-white/70 hover:bg-orange-950/20"
+      : "border-black/10 text-black/45 hover:border-orange-400/40 hover:text-black/70 hover:bg-orange-50",
   };
 
+  // ── EMPTY STATE ───────────────────────────────────────────────────────────
+  if (!started) {
+    return (
+      <div className={`h-screen flex flex-col ${T.appBg} font-sans overflow-hidden transition-colors duration-300`}>
+
+        {/* topbar — minimal */}
+        <div className={`flex items-center justify-between px-5 h-12 border-b ${T.border} flex-shrink-0`}>
+          <div className="flex items-center gap-2.5">
+            <GlassLogo />
+            <span className={`text-[15px] font-semibold tracking-tight ${T.txt}`}>Glass</span>
+            <span className={`text-[10px] px-2 py-0.5 rounded-full border ${T.border} ${T.txtMuted}`}>v0.1</span>
+          </div>
+          <button
+            onClick={() => setTheme(isDark ? "light" : "dark")}
+            className={`text-xs px-3 py-1 rounded-lg border transition-all ${T.secBtn}`}
+          >
+            {isDark ? "light mode" : "dark mode"}
+          </button>
+        </div>
+
+        {/* centred hero */}
+        <div className="flex-1 flex flex-col items-center justify-center px-6 gap-8">
+
+          <div className="flex flex-col items-center gap-3 text-center max-w-sm">
+            <div className="w-12 h-12 bg-orange-600 rounded-2xl flex items-center justify-center mb-1">
+              <svg width="22" height="22" viewBox="0 0 14 14" fill="none">
+                <circle cx="7" cy="7" r="5.5" stroke="white" strokeWidth="1.5"/>
+                <path d="M4.5 7L6.5 9L9.5 5" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
+            <h1 className={`text-xl font-semibold tracking-tight ${T.txt}`}>
+              Describe a task.
+            </h1>
+            <p className={`text-sm leading-relaxed ${T.txtMuted}`}>
+              Glass shows you every step before anything happens — approve, redirect, or roll back at any point.
+            </p>
+          </div>
+
+          {/* input */}
+          <div className="w-full max-w-lg flex gap-2">
+            <input
+              ref={inputRef}
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && handleSend()}
+              placeholder="What do you want to build or do?"
+              className={`flex-1 text-sm px-4 py-3 rounded-xl border ${T.border} ${T.inputBg} ${T.txt} outline-none focus:border-orange-500/50 transition-all`}
+            />
+            <button
+              onClick={() => handleSend()}
+              className="px-5 py-3 text-sm font-medium bg-orange-600 hover:bg-orange-500 text-white rounded-xl transition-all"
+            >
+              go
+            </button>
+          </div>
+
+          {/* example prompts */}
+          <div className="flex flex-col gap-2 w-full max-w-lg">
+            <p className={`text-[10px] uppercase tracking-wider text-center ${T.txtFaint}`}>try an example</p>
+            {EXAMPLES.map((ex, i) => (
+              <button
+                key={i}
+                onClick={() => handleSend(ex)}
+                className={`text-left text-xs px-4 py-2.5 rounded-xl border transition-all ${T.exampleBtn}`}
+              >
+                {ex}
+              </button>
+            ))}
+          </div>
+
+        </div>
+      </div>
+    );
+  }
+
+  // ── ACTIVE COCKPIT ────────────────────────────────────────────────────────
   return (
     <div className={`h-screen flex flex-col ${T.appBg} font-sans overflow-hidden transition-colors duration-300`}>
 
       {/* topbar */}
       <div className={`flex items-center justify-between px-5 h-12 border-b ${T.border} flex-shrink-0`}>
         <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 bg-orange-600 rounded-lg flex items-center justify-center">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <circle cx="7" cy="7" r="5.5" stroke="white" strokeWidth="1.5"/>
-              <path d="M4.5 7L6.5 9L9.5 5" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          </div>
+          <GlassLogo />
           <span className={`text-[15px] font-semibold tracking-tight ${T.txt}`}>Glass</span>
           <span className={`text-[10px] px-2 py-0.5 rounded-full border ${T.border} ${T.txtMuted}`}>v0.1</span>
-          {isTauri && (
-            <span className={`text-[10px] px-2 py-0.5 rounded-full border border-orange-800/40 text-orange-400`}>
-              desktop
-            </span>
-          )}
         </div>
-
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
             <div className={`w-1.5 h-1.5 rounded-full ${agentBusy ? "bg-orange-500 animate-pulse" : "bg-green-500"}`} />
             <span className={`text-xs ${T.txtMuted}`}>{agentStatus}</span>
           </div>
           {agentBusy && isTauri && (
-            <button onClick={handlePause} className={`text-xs px-3 py-1 rounded-lg border transition-all border-red-800/40 text-red-400 hover:bg-red-950/30`}>
+            <button onClick={handlePause} className="text-xs px-3 py-1 rounded-lg border transition-all border-red-800/40 text-red-400 hover:bg-red-950/30">
               pause
             </button>
           )}
@@ -384,15 +406,18 @@ export default function Glass() {
         {/* sidebar */}
         <div className={`w-52 ${T.sidebarBg} border-r ${T.border} flex flex-col flex-shrink-0`}>
           <div className={`p-3 border-b ${T.border}`}>
-            <p className={`text-[10px] uppercase tracking-wider ${T.txtFaint} mb-2`}>sessions</p>
+            <p className={`text-[10px] uppercase tracking-wider ${T.txtFaint} mb-2`}>session</p>
             <div className={`flex items-center gap-2 p-2 rounded-lg border ${T.sessionCard}`}>
               <div className="w-2 h-2 rounded-full bg-orange-500 flex-shrink-0" />
-              <div>
-                <p className={`text-xs font-medium ${T.txt}`}>Bakery landing page</p>
+              <div className="min-w-0">
+                <p className={`text-xs font-medium ${T.txt} truncate`}>{sessionName}</p>
                 <p className={`text-[10px] ${T.txtMuted}`}>active now</p>
               </div>
             </div>
-            <button className={`flex items-center gap-1.5 w-full mt-1.5 p-2 rounded-lg border border-dashed text-xs transition-all ${T.newSession}`}>
+            <button
+              onClick={() => { setStarted(false); setThread([]); setPlan([]); setStats({steps:0,total:0,actions:0,files:0,redirects:0}); setAgentBusy(false); setAgentStatus("ready"); setTermLines([{cls:"dim",text:"glass v0.1 — waiting for task"}]); }}
+              className={`flex items-center gap-1.5 w-full mt-1.5 p-2 rounded-lg border border-dashed text-xs transition-all ${T.newSession}`}
+            >
               <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
                 <path d="M5 2v6M2 5h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
               </svg>
@@ -403,14 +428,14 @@ export default function Glass() {
           <div className={`p-3 border-b ${T.border}`}>
             <p className={`text-[10px] uppercase tracking-wider ${T.txtFaint} mb-2`}>agent</p>
             <div className={`flex items-center gap-2 p-2 rounded-lg border ${T.border} ${T.cardBg}`}>
-              <div className={`w-6 h-6 rounded-md ${isDark ? "bg-white/5" : "bg-black/6"} flex items-center justify-center flex-shrink-0`}>
+              <div className={`w-6 h-6 rounded-md ${isDark?"bg-white/5":"bg-black/6"} flex items-center justify-center flex-shrink-0`}>
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
                   <rect x="1" y="3" width="10" height="7" rx="2" stroke="#f97316" strokeWidth="1"/>
                   <path d="M4 3V2a2 2 0 014 0v1" stroke="#f97316" strokeWidth="1"/>
                 </svg>
               </div>
               <div>
-                <p className={`text-xs font-medium ${T.txt}`}>Claude Code</p>
+                <p className={`text-xs font-medium ${T.txt}`}>Claude</p>
                 <p className={`text-[10px] ${T.txtMuted}`}>claude-sonnet-4</p>
               </div>
             </div>
@@ -418,7 +443,7 @@ export default function Glass() {
 
           <div className="p-3 grid grid-cols-2 gap-1.5">
             {[
-              { label:"steps",     val:`${stats.steps}/${stats.total}` },
+              { label:"steps",     val:`${stats.steps}/${stats.total || "—"}` },
               { label:"actions",   val:stats.actions   },
               { label:"files",     val:stats.files     },
               { label:"redirects", val:stats.redirects },
@@ -434,27 +459,34 @@ export default function Glass() {
         {/* main */}
         <div className="flex-1 flex flex-col overflow-hidden min-w-0">
 
-          {/* plan bar */}
-          <div className={`px-4 py-2.5 border-b ${T.border} flex-shrink-0`}>
-            <div className="flex items-center justify-between mb-2">
-              <span className={`text-[10px] uppercase tracking-wider ${T.txtFaint}`}>proposed plan</span>
-              <button onClick={approveAll} className="text-[11px] text-green-400 bg-green-950/50 border border-green-800/40 rounded-md px-2.5 py-0.5 hover:bg-green-950 transition-all">
-                approve all
-              </button>
+          {/* plan bar — only show when plan exists */}
+          {plan.length > 0 && (
+            <div className={`px-4 py-2.5 border-b ${T.border} flex-shrink-0`}>
+              <div className="flex items-center justify-between mb-2">
+                <span className={`text-[10px] uppercase tracking-wider ${T.txtFaint}`}>proposed plan</span>
+                <button onClick={approveAll} className="text-[11px] text-green-400 bg-green-950/50 border border-green-800/40 rounded-md px-2.5 py-0.5 hover:bg-green-950 transition-all">
+                  approve all
+                </button>
+              </div>
+              <div className="flex gap-1.5 flex-wrap">
+                {plan.map(p => (
+                  <span key={p.id} className={`text-[11px] px-2.5 py-0.5 rounded-full border transition-all ${
+                    p.state==="done"   ? "bg-green-950/50 border-green-800/40 text-green-400" :
+                    p.state==="active" ? "bg-orange-950/50 border-orange-700/40 text-orange-400" :
+                    T.planNext
+                  }`}>{p.label}</span>
+                ))}
+              </div>
             </div>
-            <div className="flex gap-1.5 flex-wrap">
-              {plan.map(p => (
-                <span key={p.id} className={`text-[11px] px-2.5 py-0.5 rounded-full border transition-all ${
-                  p.state==="done"   ? "bg-green-950/50 border-green-800/40 text-green-400" :
-                  p.state==="active" ? "bg-orange-950/50 border-orange-700/40 text-orange-400" :
-                  T.planNext
-                }`}>{p.label}</span>
-              ))}
-            </div>
-          </div>
+          )}
 
           {/* thread */}
           <div ref={threadRef} className="flex-1 overflow-y-auto p-4 flex flex-col gap-2">
+            {thread.length === 0 && (
+              <div className="flex-1 flex items-center justify-center">
+                <p className={`text-xs ${T.txtFaint}`}>Glass is starting…</p>
+              </div>
+            )}
             {thread.map((item, i) => {
               if (item.type === "user") return (
                 <div key={i} className="self-end max-w-[72%]">
@@ -476,10 +508,7 @@ export default function Glass() {
           <div className={`px-4 pt-2 pb-1.5 flex gap-1.5 flex-wrap border-t ${T.border} flex-shrink-0`}>
             {["try a different approach","ask me a question first","why is this happening?","use a different file"].map(t => (
               <button key={t}
-                onClick={() => t === "why is this happening?"
-                  ? updateCard("c3", { explain:"Claude is writing the top section of your page — your bakery name and tagline. Nothing saves until you approve." })
-                  : setInput(t)
-                }
+                onClick={() => setInput(t)}
                 className={`text-[11px] px-2.5 py-1 rounded-lg border transition-all ${T.intervBtn}`}
               >{t}</button>
             ))}
@@ -493,32 +522,31 @@ export default function Glass() {
             <button onClick={rollBack} className={`px-4 py-2 text-sm border rounded-xl transition-all ${T.secBtn}`}>
               roll back
             </button>
-            <button onClick={() => document.getElementById("glass-input").focus()} className={`px-4 py-2 text-sm border rounded-xl transition-all ${T.secBtn}`}>
-              redirect
+            <button onClick={approveAll} className={`px-4 py-2 text-sm border rounded-xl transition-all ${T.secBtn}`}>
+              approve all
             </button>
           </div>
 
           {/* input */}
           <div className="px-4 pb-4 flex gap-2 flex-shrink-0">
             <input
-              id="glass-input"
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === "Enter" && handleSend()}
               placeholder="redirect, ask a question, or change something..."
               className={`flex-1 text-sm px-4 py-2.5 rounded-xl border ${T.border} ${T.inputBg} ${T.txt} outline-none focus:border-orange-500/50 transition-all`}
             />
-            <button onClick={handleSend} className="px-5 py-2.5 text-sm font-medium bg-orange-600 hover:bg-orange-500 text-white rounded-xl transition-all">
+            <button onClick={() => handleSend()} className="px-5 py-2.5 text-sm font-medium bg-orange-600 hover:bg-orange-500 text-white rounded-xl transition-all">
               send
             </button>
           </div>
         </div>
 
-        {/* terminal */}
+        {/* terminal hood */}
         <div className={`bg-[#060608] flex flex-col border-l ${T.border} transition-all duration-300 overflow-hidden flex-shrink-0 ${hoodOpen ? "w-56" : "w-0"}`}>
           <div className="px-3.5 py-2.5 border-b border-white/5 flex items-center justify-between flex-shrink-0">
             <span className="text-[10px] font-mono text-white/30 tracking-wider">under the hood</span>
-            <div className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
+            <div className={`w-1.5 h-1.5 rounded-full ${agentBusy ? "bg-orange-500 animate-pulse" : "bg-white/20"}`} />
           </div>
           <div ref={termRef} className="flex-1 overflow-y-auto px-3 py-2.5 font-mono text-[11px] leading-relaxed">
             {termLines.map((l, i) => (
