@@ -83,8 +83,9 @@ export default function Glass() {
   const [input, setInput]             = useState("");
   const [agentStatus, setAgentStatus] = useState("agent working");
   const [agentBusy, setAgentBusy]     = useState(true);
-  const threadRef = useRef(null);
-  const termRef   = useRef(null);
+  const threadRef   = useRef(null);
+  const termRef     = useRef(null);
+  const unlistenRef = useRef([]); // holds Tauri event unsubscribe functions
 
   const [thread, setThread] = useState([
     { type:"user", text:"make me a landing page for my bakery called Golden Crumb" },
@@ -131,6 +132,11 @@ export default function Glass() {
   useEffect(() => { if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight; }, [thread]);
   useEffect(() => { if (termRef.current)   termRef.current.scrollTop   = termRef.current.scrollHeight;   }, [termLines]);
 
+  // cleanup Tauri listeners on unmount
+  useEffect(() => {
+    return () => { unlistenRef.current.forEach(fn => fn()); };
+  }, []);
+
   const addTermLine = (cls, text) => setTermLines(p => [...p, { cls, text }]);
   const addNote     = (text, color="") => setThread(p => [...p, { type:"note", text, color }]);
   const updateCard  = (id, changes) => setThread(p => p.map(i => i.type==="card" && i.id===id ? {...i,...changes} : i));
@@ -166,77 +172,141 @@ export default function Glass() {
     setAgentBusy(false);
   }
 
+  // ── detect Tauri environment ──────────────────────────────────────────────
+  const isTauri = typeof window !== "undefined" && !!window.__TAURI__;
+
+  // ── Tauri event handler for step cards ───────────────────────────────────
+  function handleStepCardEvent(data) {
+    if (data.type === "step") {
+      const cardId = `live-${Date.now()}-${Math.random()}`;
+      setThread(p => [...p, {
+        type: "card",
+        id: cardId,
+        label: data.label,
+        sub: data.sub,
+        state: data.state,
+        diff: data.diff || null,
+      }]);
+      addTermLine(data.state === "done" ? "out" : "warn", `→ ${data.label}`);
+      setStats(p => ({...p, actions: p.actions + 1}));
+    }
+    if (data.type === "explain") {
+      addNote(data.text);
+    }
+    if (data.type === "done") {
+      setAgentBusy(false);
+      setAgentStatus("done");
+      addTermLine("cmd", `$ done — ${data.summary}`);
+    }
+  }
+
+  // ── send handler: Tauri path or web fetch path ────────────────────────────
   async function handleSend() {
     const val = input.trim();
     if (!val) return;
     setInput("");
     setAgentBusy(true);
     setAgentStatus("agent working...");
-
-    // add user message to thread
     setThread(p => [...p, { type:"user", text:val }]);
     addTermLine("cmd", `$ glass --task "${val}"`);
 
-    try {
-      const res = await fetch("/api/agent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task: val }),
-      });
+    if (isTauri) {
+      // ── desktop path ──
+      try {
+        // clean up any old listeners
+        unlistenRef.current.forEach(fn => fn());
+        unlistenRef.current = [];
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+        const { listen } = await import("@tauri-apps/api/event");
+        const { invoke } = await import("@tauri-apps/api/core");
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        // listen to step cards from Rust
+        const unlistenCards = await listen("step-card", (event) => {
+          handleStepCardEvent(event.payload);
+        });
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop();
+        // listen to terminal lines from Rust
+        const unlistenTerm = await listen("terminal-line", (event) => {
+          const { cls, text } = event.payload;
+          if (text && text.trim()) addTermLine(cls, text.trim());
+        });
 
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const data = JSON.parse(line);
+        // listen for cancel
+        const unlistenCancel = await listen("agent-cancelled", () => {
+          setAgentBusy(false);
+          setAgentStatus("cancelled");
+          addNote("agent cancelled", "err");
+        });
 
-            if (data.type === "step") {
-              const cardId = `live-${Date.now()}-${Math.random()}`;
-              setThread(p => [...p, {
-                type: "card",
-                id: cardId,
-                label: data.label,
-                sub: data.sub,
-                state: data.state,
-                diff: data.diff || null,
-              }]);
-              addTermLine(data.state === "done" ? "out" : "warn", `→ ${data.label}`);
-              setStats(p => ({...p, actions: p.actions + 1}));
-            }
+        unlistenRef.current = [unlistenCards, unlistenTerm, unlistenCancel];
 
-            if (data.type === "explain") {
-              setThread(p => [...p, { type:"note", text: data.text }]);
-            }
+        // invoke the Rust command
+        await invoke("run_agent", { task: val, history: [] });
 
-            if (data.type === "done") {
-              setAgentBusy(false);
-              setAgentStatus("done");
-              addTermLine("cmd", `$ done — ${data.summary}`);
-            }
-
-          } catch { /* incomplete JSON, skip */ }
-        }
+      } catch (err) {
+        setThread(p => [...p, {
+          type:"card", id:`err-${Date.now()}`,
+          label:"error starting agent",
+          sub: String(err),
+          state:"rolled"
+        }]);
+        setAgentBusy(false);
+        setAgentStatus("error");
       }
-    } catch (err) {
-      setThread(p => [...p, {
-        type:"card", id:`err-${Date.now()}`,
-        label:"connection error",
-        sub: err.message,
-        state:"rolled"
-      }]);
+
+    } else {
+      // ── web path (unchanged) ──
+      try {
+        const res = await fetch("/api/agent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ task: val }),
+        });
+
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer    = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const data = JSON.parse(line);
+              handleStepCardEvent(data);
+            } catch { /* incomplete JSON */ }
+          }
+        }
+      } catch (err) {
+        setThread(p => [...p, {
+          type:"card", id:`err-${Date.now()}`,
+          label:"connection error",
+          sub: err.message,
+          state:"rolled"
+        }]);
+        setAgentBusy(false);
+        setAgentStatus("error");
+      }
+    }
+  }
+
+  // ── pause / cancel ────────────────────────────────────────────────────────
+  async function handlePause() {
+    if (!isTauri) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("cancel_agent");
       setAgentBusy(false);
-      setAgentStatus("error");
+      setAgentStatus("paused");
+      addNote("agent paused");
+    } catch (err) {
+      console.error("pause failed:", err);
     }
   }
 
@@ -282,6 +352,11 @@ export default function Glass() {
           </div>
           <span className={`text-[15px] font-semibold tracking-tight ${T.txt}`}>Glass</span>
           <span className={`text-[10px] px-2 py-0.5 rounded-full border ${T.border} ${T.txtMuted}`}>v0.1</span>
+          {isTauri && (
+            <span className={`text-[10px] px-2 py-0.5 rounded-full border border-orange-800/40 text-orange-400`}>
+              desktop
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-3">
@@ -289,6 +364,11 @@ export default function Glass() {
             <div className={`w-1.5 h-1.5 rounded-full ${agentBusy ? "bg-orange-500 animate-pulse" : "bg-green-500"}`} />
             <span className={`text-xs ${T.txtMuted}`}>{agentStatus}</span>
           </div>
+          {agentBusy && isTauri && (
+            <button onClick={handlePause} className={`text-xs px-3 py-1 rounded-lg border transition-all border-red-800/40 text-red-400 hover:bg-red-950/30`}>
+              pause
+            </button>
+          )}
           <button onClick={() => setTheme(isDark ? "light" : "dark")} className={`text-xs px-3 py-1 rounded-lg border transition-all ${T.secBtn}`}>
             {isDark ? "light mode" : "dark mode"}
           </button>
