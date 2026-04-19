@@ -32,10 +32,24 @@ function StepCard({ card, isDark, onDownload }) {
 
   const pillText = { done:"done", active:"working now", waiting:"waiting", rolled:"rolled back", approved:"approved" }[card.state];
 
-  // extract downloadable content from diff — lines starting with +
-  const downloadable = card.diff ? card.diff.filter(l => l.startsWith("+") && l.length > 2).map(l => l.slice(2)) : [];
-  const filename = card.diff ? card.diff.find(l => l.startsWith("+ ") && l.includes(".")) : null;
-  const cleanFilename = filename ? filename.replace(/^\+\s*/, "").trim() : null;
+  // find real filename in diff
+  const cardFilename = (() => {
+    if (!card.diff) return null;
+    for (const line of card.diff) {
+      if (!line.startsWith("+")) continue;
+      const m = line.slice(2).match(/^([\w\-. ]+\.(md|html|htm|py|js|ts|css|json|txt|sh|jsx|tsx))/i);
+      if (m) return m[1].trim();
+    }
+    return null;
+  })();
+
+  // clean diff into pure content — strip + prefix and filename: prefix
+  const cardContent = card.diff
+    ? card.diff
+        .filter(l => l.startsWith("+") && l.length > 1)
+        .map(l => l.slice(2).replace(/^[\w\-. ]+\.(md|html|htm|py|js|ts|css|json|txt|sh|jsx|tsx):\s*/i, ""))
+        .join("\n").trim()
+    : "";
 
   return (
     <div className={`rounded-xl border p-3 flex flex-col gap-2 transition-all duration-200 ${cardBg}`}>
@@ -44,9 +58,9 @@ function StepCard({ card, isDark, onDownload }) {
           <StateIcon state={card.state} isDark={isDark} />
           <span className={`text-sm font-medium ${labelColor}`}>{card.label}</span>
         </div>
-        {card.state === "done" && downloadable.length > 0 && cleanFilename && (
+        {card.state === "done" && cardFilename && cardContent.length > 50 && (
           <button
-            onClick={() => onDownload(downloadable.join("\n"), cleanFilename)}
+            onClick={() => onDownload(cardContent, cardFilename)}
             className={`text-[11px] px-2 py-0.5 rounded-lg border transition-all ${
               isDark
                 ? "border-white/10 text-white/40 hover:border-orange-600/40 hover:text-orange-400"
@@ -141,26 +155,79 @@ export default function Glass() {
 
   const isTauri = typeof window !== "undefined" && !!window.__TAURI__;
 
-  // ── download helper ───────────────────────────────────────────────────────
+  // ── detect file extension from content or filename ───────────────────────
+  function smartFilename(raw, fallback) {
+    // if raw already has a known extension, use it
+    const known = [".md", ".html", ".htm", ".py", ".js", ".ts", ".css", ".json", ".txt", ".sh", ".jsx", ".tsx"];
+    for (const ext of known) {
+      if (raw && raw.toLowerCase().endsWith(ext)) return raw.trim();
+    }
+    // detect from content
+    if (fallback) {
+      const f = fallback.toLowerCase();
+      if (f.includes(".")) return fallback.trim();
+    }
+    // guess from content shape
+    return fallback || "glass-output.txt";
+  }
+
+  // ── extract the real filename from a diff line like "+ anthropic_article.md: ..." ──
+  function extractFilename(diff) {
+    if (!diff) return null;
+    for (const line of diff) {
+      if (!line.startsWith("+")) continue;
+      const content = line.slice(2).trim();
+      // match "filename.ext:" or "filename.ext (..." or just "filename.ext"
+      const match = content.match(/^([\w\-. ]+\.(md|html|htm|py|js|ts|css|json|txt|sh|jsx|tsx))/i);
+      if (match) return match[1].trim();
+    }
+    return null;
+  }
+
+  // ── clean diff lines into pure content ───────────────────────────────────
+  function cleanDiff(diff) {
+    if (!diff) return "";
+    return diff
+      .filter(l => l.startsWith("+") && l.length > 1)
+      .map(l => {
+        let content = l.slice(2); // strip "+ "
+        // if line is "filename.ext: rest of content" — strip the filename prefix
+        content = content.replace(/^[\w\-. ]+\.(md|html|htm|py|js|ts|css|json|txt|sh|jsx|tsx):\s*/i, "");
+        return content;
+      })
+      .join("\n")
+      .trim();
+  }
+
+  // ── download a single card's output ──────────────────────────────────────
   function handleDownload(content, filename) {
-    const blob = new Blob([content], { type: "text/plain" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
-    a.download = filename;
+    const clean = typeof content === "string" ? content : cleanDiff(content);
+    const name  = smartFilename(filename, filename);
+    const mime  = name.endsWith(".html") || name.endsWith(".htm") ? "text/html" : "text/plain";
+    const blob  = new Blob([clean], { type: mime });
+    const url   = URL.createObjectURL(blob);
+    const a     = document.createElement("a");
+    a.href      = url;
+    a.download  = name;
     a.click();
     URL.revokeObjectURL(url);
   }
 
-  // ── download all files from session ──────────────────────────────────────
+  // ── download all — find the last/best file and save it cleanly ───────────
   function downloadAll() {
     const cards = thread.filter(i => i.type === "card" && i.diff && i.state !== "rolled");
     if (!cards.length) return;
-    const allContent = cards.map(c => {
-      const lines = c.diff.filter(l => l.startsWith("+")).map(l => l.slice(2));
-      return `// === ${c.label} ===\n${lines.join("\n")}`;
-    }).join("\n\n");
-    handleDownload(allContent, "glass-output.txt");
+
+    // find the card with the most content — usually the final "create file" card
+    const best = cards.reduce((a, b) => {
+      const aLen = cleanDiff(a.diff).length;
+      const bLen = cleanDiff(b.diff).length;
+      return bLen > aLen ? b : a;
+    });
+
+    const content  = cleanDiff(best.diff);
+    const filename = extractFilename(best.diff) || smartFilename(sessionName, "glass-output.md");
+    handleDownload(content, filename);
   }
 
   function handleStepCardEvent(data) {
