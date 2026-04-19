@@ -1,52 +1,70 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-// This tells Next.js this route streams data back instead of returning all at once
 export const runtime = "edge";
 
-// The Claude system prompt — this is how we tell Claude to behave like Glass expects
-const SYSTEM_PROMPT = `You are Glass — a visual AI agent. When given a task, you break it into clear steps and execute them.
+const SYSTEM_PROMPT = `You are Glass — a visual AI agent that executes tasks immediately.
 
-For every step you take, respond with a JSON object on its own line in this exact format:
-{"type":"step","label":"short action title","sub":"one line detail about what you are doing","state":"active"}
+CRITICAL RULES:
+1. NEVER ask the user clarifying questions. Ever. Make smart assumptions and start working immediately.
+2. ALWAYS respond ONLY with JSON objects — one per line. No plain text. No explanations outside JSON.
+3. If a task is ambiguous, pick the most reasonable interpretation and execute it.
+4. Every single response must be a valid JSON object on its own line.
 
-When a step finishes, send:
-{"type":"step","label":"same title","sub":"same detail","state":"done","diff":["+ file or change made"]}
+RESPONSE FORMAT — use exactly these four types:
 
-When you need to explain something in plain English, send:
-{"type":"explain","text":"plain English explanation of what is happening and why"}
+When starting a step:
+{"type":"step","label":"short title 3-5 words","sub":"one sentence describing what you are doing","state":"active"}
 
-When the whole task is complete, send:
-{"type":"done","summary":"what was accomplished"}
+When finishing a step (always pair with the active step above):
+{"type":"step","label":"exact same title","sub":"exact same sub","state":"done","diff":["+ filename.ext","+ key content line","+ another content line"]}
 
-Rules:
-- Keep labels short (3-5 words)
-- Keep sub to one clear sentence  
-- diff array shows actual files created or lines changed
-- Always think step by step
-- Never output anything outside of these JSON objects
-- Real code and real file contents go inside diff arrays as strings`;
+When the output is a file with real content, put the FULL file contents in the diff:
+{"type":"step","label":"create article file","sub":"writing complete article to file","state":"done","diff":["+ anthropic_article.md: # Title\\n\\n## Section\\n\\nFull content here..."]}
+
+When sharing a plain english insight (use sparingly):
+{"type":"explain","text":"one sentence plain english explanation"}
+
+When completely done:
+{"type":"done","summary":"one sentence of what was accomplished"}
+
+TASK EXECUTION RULES:
+- Break every task into 3-6 concrete steps
+- Each step must produce something real — a file, content, a structure
+- The LAST step must always create the final output file with FULL content in the diff
+- For articles/documents: write the complete text, not a summary
+- For code: write the complete working code, not a skeleton
+- For research: gather and present the actual information
+- Filename must include the correct extension: .md for articles, .html for web pages, .py for Python, .js for JavaScript
+- NEVER skip steps, NEVER leave placeholders, NEVER say "content here"
+- Always complete the full task from start to finish in one session
+
+ASSUMPTIONS TO MAKE (never ask about these):
+- Article length: 800-1200 words unless told otherwise
+- Code: fully functional, no placeholders
+- Style: clean and professional
+- Audience: general unless obvious from context
+- Format: markdown for documents, semantic HTML for web pages`;
 
 export async function POST(request) {
-  // Read the task the user sent from the frontend
   const { task, history = [] } = await request.json();
 
-  // Create Anthropic client — reads ANTHROPIC_API_KEY from environment variables
   const client = new Anthropic();
 
-  // Build the message history — previous steps become context for Claude
   const messages = [
     ...history,
     { role: "user", content: task },
   ];
 
-  // Create a streaming response — data flows back to the browser as Claude thinks
   const stream = new ReadableStream({
     async start(controller) {
+      const send = (obj) => {
+        controller.enqueue(new TextEncoder().encode(JSON.stringify(obj) + "\n"));
+      };
+
       try {
-        // Call Claude with streaming enabled
         const response = await client.messages.create({
           model: "claude-sonnet-4-5",
-          max_tokens: 4096,
+          max_tokens: 8000,
           system: SYSTEM_PROMPT,
           messages,
           stream: true,
@@ -54,56 +72,58 @@ export async function POST(request) {
 
         let buffer = "";
 
-        // As Claude generates text, we receive it in chunks
         for await (const chunk of response) {
           if (chunk.type === "content_block_delta" && chunk.delta.type === "text_delta") {
             buffer += chunk.delta.text;
 
-            // Try to parse complete JSON objects from the buffer
             const lines = buffer.split("\n");
-            buffer = lines.pop(); // keep incomplete line in buffer
+            buffer = lines.pop();
 
             for (const line of lines) {
               const trimmed = line.trim();
               if (!trimmed) continue;
+
+              // try to parse as JSON first
               try {
-                // Validate it's real JSON before sending
-                JSON.parse(trimmed);
-                // Send the line to the frontend
+                const parsed = JSON.parse(trimmed);
+                // valid JSON card — send it
                 controller.enqueue(new TextEncoder().encode(trimmed + "\n"));
               } catch {
-                // Not valid JSON yet — skip
+                // not JSON — Claude broke format and sent plain text
+                // wrap it as an explain card so user can see it
+                if (trimmed.length > 10) {
+                  send({ type: "explain", text: trimmed });
+                }
               }
             }
           }
         }
 
-        // Flush anything left in the buffer
+        // flush buffer
         if (buffer.trim()) {
           try {
             JSON.parse(buffer.trim());
             controller.enqueue(new TextEncoder().encode(buffer.trim() + "\n"));
           } catch {
-            // ignore incomplete
+            if (buffer.trim().length > 10) {
+              send({ type: "explain", text: buffer.trim() });
+            }
           }
         }
 
         controller.close();
       } catch (error) {
-        // Send error back to frontend as a JSON step card
-        const errCard = JSON.stringify({
+        send({
           type: "step",
           label: "something went wrong",
           sub: error.message,
           state: "rolled",
         });
-        controller.enqueue(new TextEncoder().encode(errCard + "\n"));
         controller.close();
       }
     },
   });
 
-  // Return the stream with correct headers so browser knows it's streaming
   return new Response(stream, {
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
